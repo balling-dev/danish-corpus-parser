@@ -120,7 +120,7 @@ character. The three groups of morphological markers are separated by colons (:)
 
 The following structure shows the positions of the tags used in ePOS:
 
-![](inflectional-markers.png)
+![](https://github.com/balling-cc/danish-corpus-parser/blob/master/inflectional-markers.png)
 
 ## Nominal markers
 
@@ -154,7 +154,7 @@ markers:
 
 ## POS markers and subclassifiers
 
-![](pos-markers-and-subclassifiers.png)
+![](https://github.com/balling-cc/danish-corpus-parser/blob/master/pos-markers-and-subclassifiers.png)
 
 License
 -------
