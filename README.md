@@ -112,10 +112,11 @@ Adapted from [Jørg Asmussen: Design of the ePOS tagger](http://korpus.dsl.dk/cl
 
 The basic structure of an ePOS tag is:
 
-```CLASS:nominal:verbal:additional```
+```
+CLASS:nominal:verbal:additional
+```
 
-where ```CLASS``` is a two-character POS classifier comprising a POS indicator (first character) and a sub-classifier. The first colon indicates the boundary between the ```CLASS``` part and the inflectional part of the tag. Here, ```nominal``` and ```verbal``` are strings of markers concerning nominal and verbal morphological information respectively. The ```additional``` string carries further markers relevant to adjectives, some adverbs, and pronouns. Marker strings have fixed lengths – ```nominal``` 4,
-```verbal``` 2, and ```additional``` 4. Each marker in such a string is represented by one
+where ```CLASS``` is a two-character POS classifier comprising a POS indicator (first character) and a sub-classifier. The first colon indicates the boundary between the ```CLASS``` part and the inflectional part of the tag. Here, ```nominal``` and ```verbal``` are strings of markers concerning nominal and verbal morphological information respectively. The ```additional``` string carries further markers relevant to adjectives, some adverbs, and pronouns. Marker strings have fixed lengths – ```nominal``` 4, ```verbal``` 2, and ```additional``` 4. Each marker in such a string is represented by one
 character. The three groups of morphological markers are separated by colons (:).
 
 The following structure shows the positions of the tags used in ePOS:
