@@ -1,0 +1,793 @@
+#!/usr/bin/env bash
+
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+#
+# Copyright (c) 2017, Kristoffer Winther Balling & Laura Winther Balling
+#
+#
+# This script parses corpus resources Korpus 90, Korpus 2000 and Korpus 2010,
+# made available by the Society for Danish Language and Literature (www.dsl.dk)
+#
+# Corpus resources are available for download in password-protected .zip files:
+#   Korpus 90: http://korpus.dsl.dk/resources/corpora/KDK-1990.scrambled.zip
+#   korpus 2000: http://korpus.dsl.dk/resources/corpora/KDK-2000.scrambled.zip
+#   Korpus 2010: http://korpus.dsl.dk/resources/corpora/KDK-2010.scrambled.zip
+#
+# To obtain a password, please send a mail to korpus@dsl.dk with a brief
+# description of the purpose(s) you intend to use the resources for.
+# 
+# The parser requires GNU awk (gawk) version 4.1.3 or higher, and GNU parallel
+# version 20141022 or higher.
+#
+# All korpora are in UTF-8 format and output from the parser is also UTF-8.
+#
+# The size of each korpus is:
+#   Korpus 90:   244 MB compressed (22.1m words)
+#   korpus 2000: 229 MB compressed (21.6m words)
+#   Korpus 2010: 323 MB compressed (42.4m words)
+#
+
+VERSION="0.0.1.0"
+
+# ------------------------------------------------------------------------------
+#  GAWK SCRIPTS
+# ------------------------------------------------------------------------------
+
+GAWK_WLPT_SCRIPT="#
+#
+# This script collects and prints all unique combinations of words, lemmas,
+# part-of-speech and tag (WLPT) along with their incidence. Words and lemmas are
+# converted to lower-case.
+#
+# Input is DSL original files (UTF-8 format)
+# Output is tab-separated word <tab> lemma <tab> pos <tab> tag <tab> incidence
+#
+BEGIN {
+    OFS=\"\t\";
+  }
+  \$0 !~ /^<.*>$/ {
+    word = tolower(\$1)
+    punctuation = \$3
+    gsub(/_/, \"\", punctuation)
+    lemma = tolower(\$4)
+    pos = \$5
+    tag = substr(\$6, 1, 15)
+    wlpt=word\"\t\"lemma\"\t\"pos\"\t\"tag
+    if (wlpt in wlpts) {
+      wlpts[wlpt] = wlpts[wlpt] + 1
+    } else {
+      wlpts[wlpt] = 1
+    }
+    # Some punctuations are prefixed by $
+    if (length(punctuation) > 1 && index(punctuation, \"$\") > 0) {
+      sub(/\\$/, \"\", punctuation)
+    }
+    if (length(punctuation) > 0) {
+      # Punctuations are considered separate "words"
+      wlpt=punctuation\"\t\"punctuation\"\tNA\"\"\tNA\"
+      if (wlpt in wlpts) {
+        wlpts[wlpt] = wlpts[wlpt] + 1
+      } else {
+        wlpts[wlpt] = 1
+      }
+    }
+  }
+  END {
+    for (i in wlpts) {
+      print i, wlpts[i]
+    }
+  }"
+
+# ------------------------------------------------------------------------------
+
+GAWK_WLPT_SUMMARISE_SCRIPT="#
+#
+# This script assigns unique ID numbers and counts the total incidence of each
+# word, lemma, part-of-speech, and tag (WLPT) combination.
+# 
+# Input is tab-separated: word <tab> lemma <tab> pos <tab> tag <tab> incidence
+# Output is tab-separated: id <tab> word <tab> lemma <tab> pos <tab> tag <tab>
+#   incidence
+#
+BEGIN {
+    OFS=\"\t\";
+    wlpt_id_counter=1
+}{
+    word = \$1
+    lemma = \$2
+    pos = \$3
+    tag = \$4
+    incidence = \$5
+    wlpt=word\"\t\"lemma\"\t\"pos\"\t\"tag
+    if (wlpt in wlpts) {
+      wlpt_id=wlpts[wlpt]
+    } else {
+      wlpts[wlpt]=wlpt_id_counter
+      wlpt_id=wlpt_id_counter
+      wlpt_id_counter++
+    }
+    wlpt_incidence[wlpt_id] = wlpt_incidence[wlpt_id] + incidence
+} END {
+  # Sort output by ascending numeric id
+  PROCINFO[\"sorted_in\"] = \"@val_num_asc\";
+  for (i in wlpts) {
+    wlpt_id = wlpts[i]
+    print wlpt_id, i, wlpt_incidence[wlpt_id]
+  }
+}"
+
+# ------------------------------------------------------------------------------
+
+GAWK_BASE_TABLES_SCRIPT="#
+#
+# This script generates unique tables of words, lemmas, pos and tags, and a
+# table with all unique combinations of words-lemmas-pos-tags where words,
+# lemmas, pos and tags are referred by their unique id
+#
+# The following relational database-like tables are generated:
+#   words.tsv:  word_id  <tab> word    <tab> word incidence
+#   lemmas.tsv: lemma_id <tab> lemma   <tab> lemma incidence
+#   pos.tsv:    pos_id   <tab> pos     <tab> pos incidence
+#   tags.tsv:   tag_id   <tab> tag     <tab> tag incidence
+#   wlpts.tsv:  wlpt_id  <tab> word_id <tab> lemma_id <tab> pos_id <tab>
+#     tag_id <tab> wlpe incidence
+#
+BEGIN {
+  OFS=\"\t\";
+  word_id_counter=1
+  lemma_id_counter=1
+  pos_id_counter=1
+  tag_id_counter=1
+  wlpt_id_counter=1
+}
+{
+  if (NR > 1) {
+  wlpt_id = \$1
+  word = \$2
+  lemma = \$3
+  pos = \$4
+  tag = \$5
+  incidence = \$6
+  if (word in words) {
+    word_id = words[word]
+  } else {
+    words[word] = word_id_counter
+    word_id = word_id_counter
+    word_id_counter++
+  }
+  if (lemma in lemmas) {
+    lemma_id=lemmas[lemma]
+  } else {
+    lemmas[lemma]=lemma_id_counter
+    lemma_id=lemma_id_counter
+    lemma_id_counter++
+  }
+  if (pos in postags) {
+    pos_id=postags[pos]
+  } else {
+    postags[pos]=pos_id_counter
+    pos_id=pos_id_counter
+    pos_id_counter++
+  }
+  if (tag in tags) {
+    tag_id=tags[tag]
+  } else {
+    tags[tag]=tag_id_counter
+    tag_id=tag_id_counter
+    tag_id_counter++
+  }
+  wlpti=word_id\"\t\"lemma_id\"\t\"pos_id\"\t\"tag_id
+  wlptis[wlpti]=wlpt_id
+  wlpti_incidence[wlpt_id] = incidence
+  word_incidence[word_id] = word_incidence[word_id] + incidence
+  lemma_incidence[lemma_id] = lemma_incidence[lemma_id] + incidence
+  pos_incidence[pos_id] = pos_incidence[pos_id] + incidence
+  tag_incidence[tag_id] = tag_incidence[tag_id] + incidence
+  }
+}
+END {
+  PROCINFO[\"sorted_in\"] = \"@val_num_asc\";
+  print \"id\", \"word\", \"incidence\" > WORDS_FILENAME
+  for (i in words) {
+    word_id = words[i]
+    print word_id, i, word_incidence[word_id] > WORDS_FILENAME
+  }
+  print \"id\", \"lemma\", \"incidence\" > LEMMAS_FILENAME
+  for (i in lemmas) {
+    lemma_id = lemmas[i]
+    print lemma_id, i, lemma_incidence[lemma_id] > LEMMAS_FILENAME
+  }
+  print \"id\", \"pos\", \"incidence\" > POS_FILENAME
+  for (i in postags) {
+    pos_id = postags[i]
+    print pos_id, i, pos_incidence[pos_id] > POS_FILENAME
+  }
+  print \"id\", \"tag\", \"incidence\" > TAGS_FILENAME
+  for (i in tags) {
+    tag_id = tags[i]
+    print tag_id, i, tag_incidence[tag_id] > TAGS_FILENAME
+  }
+  print \"id\", \"word_id\", \"lemma_id\", \"pos_id\", \"tag_id\", \"incidence\" > WLPT_ID_FILENAME
+  for (i in wlptis) {
+    wlpt_id = wlptis[i]
+    print wlpt_id, i, wlpti_incidence[wlpt_id] > WLPT_ID_FILENAME
+  }
+}"
+
+# ------------------------------------------------------------------------------
+
+GAWK_WPIS_SCRIPT="BEGIN {
+  OFS=\"\t\";
+  line_counter = 1
+  while(( getline line< WLPT_CHARACTER_FILE ) > 0 ) {
+    if (line_counter > 1) {
+      split(line, a, \"\t\")
+      wlpt_id = a[1]
+      word = a[2]
+      lemma = a[3]
+      pos = a[4]
+      tag = a[5]
+      wlpt=word\"\t\"lemma\"\t\"pos\"\t\"tag
+      wlpts[wlpt]=wlpt_id
+    }
+    line_counter++
+  }
+}{
+    while(( getline line< \$0 ) > 0 ) {
+      if (line ~ /<s id=/) {
+        sid = line
+        sub(/.*<s id=/, \"\", sid)
+        split(sid, a, \"\\\"\")
+        sentence_id = a[2]
+        word_position = 1
+      }
+      if (line !~ /^<.*>$/) {
+        split(line, a, \"\t\")
+        word = tolower(a[1])
+        punctuation = a[3]
+        gsub(/_/, \"\", punctuation)
+        lemma = tolower(a[4])
+        pos = a[5]
+        tag = substr(a[6], 1, 15)
+        wlpt=word\"\t\"lemma\"\t\"pos\"\t\"tag
+        wlpt_id = wlpts[wlpt]
+        print sentence_id, word_position, wlpt_id
+        word_position++
+        if (length(punctuation) > 1 && index(punctuation, \"$\") > 0) {
+          sub(/\\$/, \"\", punctuation)
+        }
+        if (length(punctuation) > 0) {
+          wlpt=punctuation\"\t\"punctuation\"\tNA\"\"\tNA\"
+          wlpt_id = wlpts[wlpt]
+          print sentence_id, word_position, wlpt_id
+          word_position++
+        }
+      }
+    }
+}"
+
+GAWK_LETTER_BIGRAMS_SCRIPT="BEGIN {
+    OFS=\"\t\";
+}{
+  word = \$2
+  incidence = \$3
+  word_len = length(word)
+  if (word_len > 1) {
+    for (i = 1; i <= (word_len-1); i++) {
+      bigram=substr(word, i, 2)
+      bigram_incidence[bigram] = bigram_incidence[bigram] + incidence
+    }
+  }
+} END {
+  for (i in bigram_incidence) {
+    if (i ~ /^[abcdefghijklmnopqrstuvwxyzæøå]*$/) {
+      print i, bigram_incidence[i]
+    }
+  }
+}"
+
+GAWK_SENTENCE_SCRIPT="BEGIN {
+    OFS=\"\t\";
+    is_sentence = 0;
+}
+  \$0 !~ /^<.*>$/ {
+    word = tolower(\$1)
+    if (is_sentence == 0) {
+      sentence = word
+    } else {
+      sentence = sentence\" \"word
+    }
+    is_sentence = 1;
+  }
+  \$0 ~ /^<.*>$/ {
+    if (is_sentence == 1) {
+      print sentence
+      sentence=\"\"
+      is_sentence=0
+    }
+  }"
+
+
+# ------------------------------------------------------------------------------
+#  DEFAULT VALUES
+# ------------------------------------------------------------------------------
+
+DCP_CORPUS_PATH="${DCP_CORPUS_PATH:-./dsl}"
+DCP_OUTPUT_PATH="${DCP_OUTPUT_PATH:-.}"
+DCP_TEMP_PATH="${DCP_TEMP_PATH:-/tmp}"
+DCP_CPU="${DCP_CPU:-2}"
+DCP_WORDS_TBL="${DCP_WORDS_TBL:-words.tsv}"
+DCP_LEMMAS_TBL="${DCP_LEMMAS_TBL:-lemmas.tsv}"
+DCP_POS_TBL="${DCP_POS_TBL:-pos.tsv}"
+DCP_TAGS_TBL="${DCP_TAGS_TBL:-tags.tsv}"
+DCP_SENTENCES_TBL="${DCP_SENTENCES_TBL:-sentences.txt}"
+DCP_WLPT_CHARACTER_TBL="${DCP_WLPT_CHARACTER_TBL:-wlptc.tsv}"
+DCP_WLPT_ID_TBL="${DCP_WLPT_ID_TBL:-wlpt.tsv}"
+DCP_WPIS_TBL="${DCP_WPIS_TBL:-wpis.tsv}"
+DCP_LETTER_BIGRAMS_TBL="${DCP_LETTER_BIGRAMS_TBL:-lbigrams.tsv}"
+DCP_SORT_BUFFER="${DCP_SORT_BUFFER:-100M}"
+FORCE=0
+DEBUG=0
+VERBOSE=0
+ACTION=
+
+
+# ------------------------------------------------------------------------------
+#  HELP/USAGE
+# ------------------------------------------------------------------------------
+
+USAGE="Danish Corpus Parser v$VERSION
+Usage: $(basename "$0") [ACTION] [OPTIONS]
+
+where [ACTION] is:
+  all,      make all tables
+  base,     make base tables by assigning unique identifiers and summarising
+            incidences of words, lemmas, POS and tags (from $DCP_WLPT_CHARACTER_TBL file)
+  deriv,    make derived tables (letter bigrams, from $DCP_WORDS_TBL file)
+  extract,  extract unique word, lemma, POS, tag combinations from corpus files
+  sentence, output assembled sentences (one per line) (from corpus files).
+  wpis,     make word position in sentence table (from corpus files and
+            $DCP_WLPT_ID_TBL file)
+
+Directory options:
+  -i,  input (corpus) directory (default: $DCP_CORPUS_PATH)
+  -o,  output (tables) directory ($DCP_OUTPUT_PATH)
+  -t,  temporary directory (default: $DCP_TEMP_PATH)
+
+Filename options:
+  -A,  tags filename (default: $DCP_TAGS_TBL)
+  -B,  letter bigram filename (default: $DCP_LETTER_BIGRAMS_TBL)
+  -I,  word positions in sentences filename (default: $DCP_WPIS_TBL)
+  -L,  lemma filename (default: $DCP_LEMMAS_TBL)
+  -P,  part-of-speech (POS) filename (default: $DCP_POS_TBL)
+  -S,  sentences filename (default: $DCP_SENTENCES_TBL)
+  -W,  words filename (default: $DCP_WORDS_TBL)
+  -X,  character words, lemmas, POS and tags filename (default: $DCP_WLPT_CHARACTER_TBL)
+  -Y,  identifier words, lemmas, POS and tags filename (default: $DCP_WLPT_ID_TBL)
+
+General options:
+  -D,  debug
+  -F,  force words, lemmas, POS and tags creation
+  -h,  show this help text
+  -v,  verbose output
+
+Performance options:
+  -C,  number of CPUs to use for prediction (default: $DCP_CPU)
+  -U,  sort buffer size (default: $DCP_SORT_BUFFER)
+
+--------------------------------------------------------------------------------
+
+Input is extracted .zip files from http://korpus.dsl.dk/resources.html as
+provided by the Society for Danish Language and Literature (www.dsl.dk)
+
+Copyright (C) 2017 Kristoffer Winther Balling (kwballing@gmail.com) and Laura Winther Balling (laura.balling@gmail.com)"
+
+
+# ------------------------------------------------------------------------------
+#  ARGUMENT PARSING
+# ------------------------------------------------------------------------------
+
+ACTION="$1"
+if [[ ! "$ACTION" =~ ^(all|base|deriv|extract|ident|sentence|wpis)$ ]]; then
+  if [ "$ACTION" == "-h" ]; then
+    echo "$USAGE"
+    exit
+  fi
+  echo "Unknown ACTION $ACTION" >&2
+  echo "$USAGE"
+  exit
+fi
+
+# First argument is action, remaning are opts
+shift
+
+while getopts 'A:B:C:d:DFhi:I:L:o:P:S:t:U:vW:X:Y:' option; do
+  case "$option" in
+    A) DCP_TAGS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    B) DCP_LETTER_BIGRAMS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    C) DCP_CPU=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    D) DEBUG=1
+       ;;
+    F) FORCE=1
+       ;;
+    h) echo "$USAGE"
+       exit
+       ;;
+    i) DCP_CORPUS_PATH=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    I) DCP_WPIS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    L) DCP_LEMMAS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    o) DCP_OUTPUT_PATH=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    P) DCP_POS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    S) DCP_SENTENCES_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    t) DCP_TEMP_PATH=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    U) DCP_SORT_BUFFER=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    v) VERBOSE=1
+       ;;
+    W) DCP_WORDS_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    X) DCP_WLPT_CHARACTER_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+    Y) DCP_WLPT_ID_TBL=$OPTARG
+       ;;
+    :) printf "missing argument for -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+   \?) printf "illegal option: -%s\n" "$OPTARG" >&2
+       echo "$USAGE" >&2
+       exit 1
+       ;;
+  esac
+done
+
+shift "$((OPTIND-1))"
+INPUTFILE="${@: -1}"
+
+
+# ------------------------------------------------------------------------------
+#  FUNCTIONS
+# ------------------------------------------------------------------------------
+
+# Return absolute path of a file
+function abspath {
+  if [[ -d "$1" ]]
+  then
+    pushd "$1" >/dev/null
+    pwd
+    popd >/dev/null
+  elif [[ -e $1 ]]
+  then
+    pushd $(dirname $1) >/dev/null
+    echo $(pwd)/$(basename $1)
+    popd >/dev/null
+  elif [[ "$1" -eq "" ]]
+  then
+    return
+  else
+    echo $1 does not exist! >&2
+    return 127
+  fi
+}
+
+
+# ------------------------------------------------------------------------------
+#  CHECK EXISTING FILES
+# ------------------------------------------------------------------------------
+
+# Check existing files so that extraction (and base tables) do not need to be
+# generated if they already exist.
+#
+# The force argument (-F) overwrites this behaviour and forces re-generation of
+# all files.
+#
+
+WLPT_CHARACTER_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL" && FORCE -eq 0 ]]; then
+  WLPT_CHARACTER_TBL_EXISTS=1
+fi
+WLPT_ID_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_WLPT_ID_TBL" && FORCE -eq 0 ]]; then
+  WLPT_ID_TBL_EXISTS=1
+fi
+WORDS_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_WORDS_TBL" && FORCE -eq 0 ]]; then
+  WORDS_TBL_EXISTS=1
+fi
+LEMMAS_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_LEMMAS_TBL" && FORCE -eq 0 ]]; then
+  LEMMAS_TBL_EXISTS=1
+fi
+POS_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_POS_TBL" && FORCE -eq 0 ]]; then
+  POS_TBL_EXISTS=1
+fi
+TAGS_TBL_EXISTS=0
+if [[ -f "$DCP_OUTPUT_PATH/$DCP_TAGS_TBL" && FORCE -eq 0 ]]; then
+  TAGS_TBL_EXISTS=1
+fi
+BASE_EXISTS=0
+if [[ WLPT_ID_TBL_EXISTS -eq 1 && WORDS_TBL_EXISTS -eq 1 && LEMMAS_TBL_EXISTS -eq 1 && POS_TBL_EXISTS -eq 1 && TAGS_TBL_EXISTS -eq 1 ]]; then
+  BASE_EXISTS=1
+fi
+
+
+# ------------------------------------------------------------------------------
+#  SETUP TEMPORARY DIRECTORIES
+# ------------------------------------------------------------------------------
+
+# Create TMPDIR if it does not exist
+if [ ! -d "$DCP_TEMP_PATH" ]; then
+  if [ "$DEBUG" -eq 1 ]; then
+    echo "Making temporary directory: $DCP_TEMP_PATH" >&2
+  fi
+  mkdir -p $DCP_TEMP_PATH
+fi
+TMPDIR=$(abspath $DCP_TEMP_PATH)
+
+# Create temporary sub directory
+TEMPDIR=$(mktemp -d "$TMPDIR"/dct_"$ACTION".XXXXXX)
+if [ "$DEBUG" -eq 1 ]; then
+  echo "dct working directory is: $TEMPDIR" >&2
+fi
+
+# Set trap to remove tempdir (unless debugging is turned on using -D)
+if [ "$DEBUG" -eq 0 ]; then
+  trap 'rm -rf "$TEMPDIR"' EXIT SIGHUP SIGINT SIGTERM
+fi
+
+
+# ------------------------------------------------------------------------------
+#  OUTPUT GAWK SCRIPTS TO TEMPORARY DIRECTORY
+# ------------------------------------------------------------------------------
+
+echo "$GAWK_WLPT_SCRIPT" > "$TEMPDIR/gawk_wlpt"
+echo "$GAWK_WLPT_SUMMARISE_SCRIPT" > "$TEMPDIR/gawk_wlpt_summarise"
+echo "$GAWK_BASE_TABLES_SCRIPT" > "$TEMPDIR/gawk_base_tables"
+echo "$GAWK_WPIS_SCRIPT" > "$TEMPDIR/gawk_wpis"
+echo "$GAWK_LETTER_BIGRAMS_SCRIPT" > "$TEMPDIR/gawk_lbigrams"
+echo "$GAWK_SENTENCE_SCRIPT" > "$TEMPDIR/gawk_sentences"
+
+
+# ------------------------------------------------------------------------------
+#  CHECK INPUT FILE
+# ------------------------------------------------------------------------------
+
+if [[ "$ACTION" =~ ^(all|extract|wpis|sentence)$ ]]; then
+  if [ ! -d "$DCP_CORPUS_PATH" ]; then
+    echo "corpus directory does not exist: $DCP_CORPUS_PATH" >&2
+    exit
+  else
+    find "$DCP_CORPUS_PATH/." -type f -name '*.txt' -print | sort > "$TEMPDIR/filelist"
+  fi
+  NOINPUTFILES=$(cat "$TEMPDIR/filelist" | wc -l)
+  if [ $VERBOSE -eq 1 ]; then
+    echo "Input files: $NOINPUTFILES (in directory $DCP_CORPUS_PATH)" >&2
+  fi
+  # No wpis.tsv will be generated if there are more CPUs assigned to parallel
+  # than there are input files.
+  if [[ NOINPUTFILES -lt DCP_CPU ]]; then
+    echo "Adjusting number of CPU's ($DCP_CPU) to match number of input files ($NOINPUTFILES)" >&2
+    DCP_CPU=$NOINPUTFILES
+  fi
+fi
+
+
+# ------------------------------------------------------------------------------
+#  EXTRACT AND COUNT INCIDENCE
+# ------------------------------------------------------------------------------
+
+if [[ "$ACTION" =~ ^(extract|all)$ ]]; then
+  if [[ WLPT_CHARACTER_TBL_EXISTS -eq 0 ]]; then
+    if [ $VERBOSE -eq 1 ]; then
+      STARTTIME=$(date +%s)
+      printf "Extracting unique word, lemma, POS and tag combinations ... " >&2
+    fi
+    cat "$TEMPDIR/filelist" | parallel --no-notice -j$DCP_CPU GAWKBIN="gawk"\; GAWKSCRIPT="$TEMPDIR/gawk_wlpt"\; '"$GAWKBIN" -F"\t" -f "$GAWKSCRIPT" {}' >> "$TEMPDIR/$DCP_WLPT_CHARACTER_TBL"
+    if [ "$VERBOSE" -eq 1 ]; then
+      ENDTIME=$(date +%s)
+      DURATION=`expr $ENDTIME - $STARTTIME`
+      echo "$DURATION second(s)" >&2
+    fi
+    if [ $VERBOSE -eq 1 ]; then
+      STARTTIME=$(date +%s)
+      printf "Counting incidences, assigning unique IDs and saving word, lemma, POS and tag combinations (to $DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL) ... " >&2
+    fi
+    echo -e "id\tword\tlemma\tpos\ttag\tincidence" > "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL" 
+    gawk -F"\t" -f "$TEMPDIR/gawk_wlpt_summarise" "$TEMPDIR/$DCP_WLPT_CHARACTER_TBL" >> "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL"
+    if [ "$VERBOSE" -eq 1 ]; then
+      ENDTIME=$(date +%s)
+      DURATION=`expr $ENDTIME - $STARTTIME`
+      echo "$DURATION second(s)" >&2
+    fi
+  else
+    if [ $VERBOSE -eq 1 ]; then
+      echo "Reading word, lemma, POS and tag combinations (from $DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL) (use -F to force extraction from corpus files)" >&2
+    fi
+  fi
+  WLPT_CHARACTER_TBL_EXISTS=1
+  if [[ "$ACTION" =~ ^(extract)$ ]]; then
+    exit
+  fi
+fi
+
+
+# ------------------------------------------------------------------------------
+#  MAKE BASE TABLES 
+# ------------------------------------------------------------------------------
+
+if [[ "$ACTION" =~ ^(base|all)$ ]]; then
+  if [[ WLPT_CHARACTER_TBL_EXISTS -eq 0 ]]; then
+    echo "cannot open word, lemma, POS and tag combination file ($DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL) - please run extract first." >&2
+    exit
+  fi
+  if [ $VERBOSE -eq 1 ]; then
+    STARTTIME=$(date +%s)
+    printf "Counting incidence and asssigning unique identifiers to individual words, lemmas, POS and tags ... " >&2
+  fi
+  gawk -F'\t' -f "$TEMPDIR/gawk_base_tables" -v WORDS_FILENAME="$DCP_WORDS_TBL" -v LEMMAS_FILENAME="$DCP_LEMMAS_TBL" -v POS_FILENAME="$DCP_POS_TBL" -v TAGS_FILENAME="$DCP_TAGS_TBL" -v WLPT_ID_FILENAME="$DCP_WLPT_ID_TBL" "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL"
+  if [ "$VERBOSE" -eq 1 ]; then
+    ENDTIME=$(date +%s)
+    DURATION=`expr $ENDTIME - $STARTTIME`
+    echo "$DURATION second(s)" >&2
+  fi
+  WLPT_CHARACTER_TBL_EXISTS=1
+  WORDS_TBL_EXISTS=1
+  LEMMAS_TBL_EXISTS=1
+  POS_TBL_EXISTS=1
+  TAGS_TBL_EXISTS=1
+  BASE_EXISTS=1
+  if [[ "$ACTION" =~ ^(base)$ ]]; then
+    exit
+  fi
+fi
+
+
+# ------------------------------------------------------------------------------
+#  DERIVED TABLE: WORD POSITION IN SENTENCE
+# ------------------------------------------------------------------------------
+#
+# This table is only relevant if the context of words need to be studied.
+#
+
+if [[ "$ACTION" =~ ^(wpis|all)$ ]]; then
+  if [[ WLPT_CHARACTER_TBL_EXISTS -eq 0 ]]; then
+    echo "cannot open word, lemma, POS and tag combination file ($DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL) - please run extract first." >&2
+    exit
+  fi
+  if [ $VERBOSE -eq 1 ]; then
+    STARTTIME=$(date +%s)
+    printf "Writing word positions in sentences (to $DCP_OUTPUT_PATH/$DCP_WPIS_TBL) ... " >&2
+  fi
+  split --number=$DCP_CPU "$TEMPDIR/filelist" "$TEMPDIR/wpis_split."
+  echo -e "id\tposition\twlpt_id" > "$DCP_OUTPUT_PATH/$DCP_WPIS_TBL"
+  find "$TEMPDIR/." -type f -name 'wpis_split*' -print | parallel --no-notice -j$DCP_CPU GAWKBIN="gawk"\; WLPT_CHARACTER_FILE="$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL"\; GAWKSCRIPT="$TEMPDIR/gawk_wpis"\;  '"$GAWKBIN" -F"\t" -f "$GAWKSCRIPT" -v WLPT_CHARACTER_FILE="$WLPT_CHARACTER_FILE" {}' >> "$DCP_OUTPUT_PATH/$DCP_WPIS_TBL"
+  if [ "$VERBOSE" -eq 1 ]; then
+    ENDTIME=$(date +%s)
+    DURATION=`expr $ENDTIME - $STARTTIME`
+    echo "$DURATION second(s)" >&2
+  fi
+  if [[ "$ACTION" =~ ^(wpis)$ ]]; then
+    exit
+  fi
+fi
+
+
+# ------------------------------------------------------------------------------
+#  DERIVED TABLE: LETTER BIGRAMS
+# ------------------------------------------------------------------------------
+#
+# This table is only relevant if letter bigrams (e.g. "er") incidence is studied.
+#
+
+if [[ "$ACTION" =~ ^(deriv|all)$ ]]; then
+  if [[ WORDS_TBL_EXISTS -eq 0 ]]; then
+    echo "cannot open words file ($DCP_OUTPUT_PATH/$DCP_WORDS_TBL) - please run base first." >&2
+    exit
+  fi
+  if [ $VERBOSE -eq 1 ]; then
+    STARTTIME=$(date +%s)
+    printf "Counting incidences of letter bigrams (to $DCP_OUTPUT_PATH/$DCP_LETTER_BIGRAMS_TBL) ... " >&2
+  fi
+  echo -e "lbigram\tincidence" > "$DCP_OUTPUT_PATH/$DCP_LETTER_BIGRAMS_TBL"
+  gawk -F'\t' -f "$TEMPDIR/gawk_lbigrams" "$DCP_OUTPUT_PATH/$DCP_WORDS_TBL" | LC_ALL=C sort -t"	" -nrk 2 >> "$DCP_OUTPUT_PATH/$DCP_LETTER_BIGRAMS_TBL"
+  if [ "$VERBOSE" -eq 1 ]; then
+    ENDTIME=$(date +%s)
+    DURATION=`expr $ENDTIME - $STARTTIME`
+    echo "$DURATION second(s)" >&2
+  fi
+  if [[ "$ACTION" =~ ^(deriv)$ ]]; then
+    exit
+  fi
+fi
+
+
+# ------------------------------------------------------------------------------
+#  MAKE SENTENCES FILE
+# ------------------------------------------------------------------------------
+#
+# The sentences file contains assembled sentences which can be used to train
+# language models (e.g. SRILM: http://www.speech.sri.com/projects/srilm/)
+#
+
+if [[ "$ACTION" =~ ^(sentence|all)$ ]]; then
+  if [ $VERBOSE -eq 1 ]; then
+    STARTTIME=$(date +%s)
+    printf "Extracting sentences ... " >&2
+  fi
+  cat "$TEMPDIR/filelist" | parallel --no-notice -j$DCP_CPU GAWKBIN="gawk"\; GAWKSCRIPT="$TEMPDIR/gawk_sentences"\; '"$GAWKBIN" -F"\t" -f "$GAWKSCRIPT" {}' > "$DCP_OUTPUT_PATH/$DCP_SENTENCES_TBL"
+  if [ "$VERBOSE" -eq 1 ]; then
+    ENDTIME=$(date +%s)
+    DURATION=`expr $ENDTIME - $STARTTIME`
+    echo "$DURATION second(s)" >&2
+  fi
+  if [[ "$ACTION" =~ ^(sentence)$ ]]; then
+    exit
+  fi
+fi
