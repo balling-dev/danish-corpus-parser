@@ -31,7 +31,7 @@
 #   Korpus 2010: 323 MB compressed (42.4m words)
 #
 
-VERSION="0.0.1.0"
+VERSION="0.0.1.9000"
 
 # ------------------------------------------------------------------------------
 #  GAWK SCRIPTS
@@ -691,7 +691,7 @@ if [[ "$ACTION" =~ ^(base|all)$ ]]; then
     STARTTIME=$(date +%s)
     printf "Counting incidence and asssigning unique identifiers to individual words, lemmas, POS and tags ... " >&2
   fi
-  gawk -F'\t' -f "$TEMPDIR/gawk_base_tables" -v WORDS_FILENAME="$DCP_WORDS_TBL" -v LEMMAS_FILENAME="$DCP_LEMMAS_TBL" -v POS_FILENAME="$DCP_POS_TBL" -v TAGS_FILENAME="$DCP_TAGS_TBL" -v WLPT_ID_FILENAME="$DCP_WLPT_ID_TBL" "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL"
+  gawk -F'\t' -f "$TEMPDIR/gawk_base_tables" -v WORDS_FILENAME="$DCP_OUTPUT_PATH/$DCP_WORDS_TBL" -v LEMMAS_FILENAME="$DCP_OUTPUT_PATH/$DCP_LEMMAS_TBL" -v POS_FILENAME="$DCP_OUTPUT_PATH/$DCP_POS_TBL" -v TAGS_FILENAME="$DCP_OUTPUT_PATH/$DCP_TAGS_TBL" -v WLPT_ID_FILENAME="$DCP_OUTPUT_PATH/$DCP_WLPT_ID_TBL" "$DCP_OUTPUT_PATH/$DCP_WLPT_CHARACTER_TBL"
   if [ "$VERBOSE" -eq 1 ]; then
     ENDTIME=$(date +%s)
     DURATION=`expr $ENDTIME - $STARTTIME`
